@@ -2,7 +2,6 @@
 package forensics
 
 import (
-	"encoding/binary"
 	"fmt"
 	"regexp"
 	"strings"
@@ -138,7 +137,7 @@ func NewScanner() *Scanner {
 		knownPatterns: []Pattern{
 			{
 				Name: "URL Pattern",
-				Pattern: regexp.MustCompile(`https?://[^\s"'<>\[\]{}|\\^`\x60]+`),
+				Pattern: regexp.MustCompile(`https?://[^\s"'<>]+`),
 			},
 			{
 				Name: "Email Pattern",
@@ -320,7 +319,7 @@ func (s *Scanner) ScanFile(filepath string) (*MemoryDump, error) {
 	}
 
 	// Extract strings
-	strings := ExtractStrings(data, 8)
+	extractedStrings := ExtractStrings(data, 8)
 	dump.NetworkConns = make([]NetworkConnection, 0)
 	dump.Secrets = make([]Secret, 0)
 
@@ -338,6 +337,7 @@ func (s *Scanner) ScanFile(filepath string) (*MemoryDump, error) {
 			// Would add to network connections
 		}
 	}
+	_ = extractedStrings
 
 	return dump, nil
 }
@@ -388,7 +388,7 @@ func AnalyzeMemory(data []byte) *MemoryDump {
 	}
 
 	// Extract strings
-	strings := ExtractStrings(data, 4)
+	_ = ExtractStrings(data, 4)
 	dump.NetworkConns = make([]NetworkConnection, 0)
 	dump.Secrets = make([]Secret, 0)
 

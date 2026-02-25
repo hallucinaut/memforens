@@ -55,7 +55,7 @@ Commands:
 Examples:
   memforens scan memory.dump
   memforens analyze /proc/meminfo
-`, "memforens")
+`)
 }
 
 func scanFile(filepath string) {
