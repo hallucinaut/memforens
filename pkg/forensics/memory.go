@@ -159,8 +159,8 @@ func (s *Scanner) ScanMemory(data []byte) ([]Secret, error) {
 	for _, pattern := range s.knownSecrets {
 		matches := pattern.Pattern.FindAllSubmatch(data, -1)
 		for _, match := range matches {
-			if len(match) > 1 {
-				secretValue := string(match[1])
+			if len(match) > 0 {
+				secretValue := string(match[0])
 				key := fmt.Sprintf("%s:%s", pattern.Name, secretValue)
 				
 				if !foundSecrets[key] {

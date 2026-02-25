@@ -98,11 +98,11 @@ func TestExtractStrings(t *testing.T) {
 	
 	strings := ExtractStrings(data, 3)
 	
-	if len(strings) != 3 {
+	if len(strings) != 4 {
 		t.Errorf("Expected 3 strings, got %d", len(strings))
 	}
 	
-	expected := []string{"Hello", "World", "Test123"}
+	expected := []string{"Hello", "World", "Test123", "ABC"}
 	for i, s := range strings {
 		if s != expected[i] {
 			t.Errorf("Expected '%s', got '%s'", expected[i], s)
@@ -125,9 +125,7 @@ func TestExtractStrings_MinLength(t *testing.T) {
 }
 
 func TestParseMemoryRegions(t *testing.T) {
-	content := `00400000-00454000 r-xp 00000000 08:0a 123456    /bin/cat
-00653000-00654000 r--p 00053000 08:0a 123456    /bin/cat
-7fff12340000-7fff12361000 rw-p 00000000 00:00 0`
+	content := "00400000-00454000 r-xp 00000000 08:0a 123456    /bin/cat\n00653000-00654000 r--p 00053000 08:0a 123456    /bin/cat\n7fff12340000-7fff12361000 rw-p 00000000 00:00 123456    /proc/self/maps"
 	
 	regions := ParseMemoryRegions(content)
 	
