@@ -1,6 +1,8 @@
 package forensics
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -472,5 +474,96 @@ func TestByteOffsetToHex(t *testing.T) {
 	offset = byteOffsetToHex(0)
 	if offset != "0x00000000" {
 		t.Errorf("expected '0x00000000', got '%s'", offset)
+	}
+}
+
+func TestScanMemoryFromFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "test.bin")
+
+	content := `fake memory dump
+AWS Key: AKIAIOSFODNN7EXAMPLE
+password=mysecretpass123
+user@example.com
+https://example.com/api`
+	if err := os.WriteFile(file, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	data, err := ReadMemoryFile(file)
+	if err != nil {
+		t.Fatalf("ReadMemoryFile failed: %v", err)
+	}
+
+	if len(data) == 0 {
+		t.Fatal("expected non-empty file content")
+	}
+
+	scanner := NewScanner()
+	secrets, err := scanner.ScanMemory(data)
+	if err != nil {
+		t.Fatalf("ScanMemory failed: %v", err)
+	}
+
+	awsFound := false
+	passFound := false
+	for _, s := range secrets {
+		switch s.Type {
+		case "AWS Access Key":
+			awsFound = true
+		case "Password Assignment":
+			passFound = true
+		}
+	}
+
+	if !awsFound {
+		t.Error("expected to find AWS Access Key from file")
+	}
+	if !passFound {
+		t.Error("expected to find Password Assignment from file")
+	}
+}
+
+
+
+func TestAnalyzeMemoryFromFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "test.bin")
+
+	content := `AKIAIOSFODNN7EXAMPLE user@example.com https://example.com 192.168.1.1 password=test1234`
+	if err := os.WriteFile(file, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	data, err := ReadMemoryFile(file)
+	if err != nil {
+		t.Fatalf("ReadMemoryFile failed: %v", err)
+	}
+
+	dump := AnalyzeMemory(data)
+
+	if dump.Secrets == nil {
+		t.Fatal("expected non-nil secrets slice")
+	}
+
+	secretTypes := make(map[string]bool)
+	for _, s := range dump.Secrets {
+		secretTypes[s.Type] = true
+	}
+
+	if !secretTypes["AWS Access Key"] {
+		t.Error("expected AWS Access Key in analysis")
+	}
+	if !secretTypes["Password Assignment"] {
+		t.Error("expected Password Assignment in analysis")
+	}
+	if dump.EmailCount < 1 {
+		t.Errorf("expected at least 1 email, got %d", dump.EmailCount)
+	}
+	if dump.URLCount < 1 {
+		t.Errorf("expected at least 1 URL, got %d", dump.URLCount)
+	}
+	if dump.IPCount < 1 {
+		t.Errorf("expected at least 1 IP, got %d", dump.IPCount)
 	}
 }
