@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/hallucinaut/memforens/pkg/forensics"
 )
@@ -12,36 +13,37 @@ const version = "1.0.0"
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
-		return
+		os.Exit(1)
 	}
 
 	switch os.Args[1] {
 	case "scan":
 		if len(os.Args) < 3 {
-			fmt.Println("Error: file path required")
+			fmt.Fprintln(os.Stderr, "Error: file path required")
 			printUsage()
-			return
+			os.Exit(1)
 		}
-		scanFile(os.Args[2])
+		runScan(os.Args[2])
 	case "analyze":
 		if len(os.Args) < 3 {
-			fmt.Println("Error: file path required")
+			fmt.Fprintln(os.Stderr, "Error: file path required")
 			printUsage()
-			return
+			os.Exit(1)
 		}
-		analyzeFile(os.Args[2])
+		runAnalyze(os.Args[2])
 	case "version":
 		fmt.Printf("memforens version %s\n", version)
 	case "help", "--help", "-h":
 		printUsage()
 	default:
-		fmt.Printf("Unknown command: %s\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
 		printUsage()
+		os.Exit(1)
 	}
 }
 
 func printUsage() {
-	fmt.Printf(`memforens - Memory Forensics Toolkit
+	fmt.Println(`memforens - Memory Forensics Toolkit
 
 Usage:
   memforens <command> [options]
@@ -54,62 +56,76 @@ Commands:
 
 Examples:
   memforens scan memory.dump
-  memforens analyze /proc/meminfo
-`)
+  memforens analyze /proc/meminfo`)
 }
 
-func scanFile(filepath string) {
-	scanner := forensics.NewScanner()
-	
-	// Read file
-	data, err := os.ReadFile(filepath)
+func runScan(filepath string) {
+	data, err := forensics.ReadMemoryFile(filepath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Scanning: %s\n", filepath)
-	fmt.Printf("File size: %d bytes\n\n", len(data))
-
-	// Scan for secrets
+	scanner := forensics.NewScanner()
 	secrets, err := scanner.ScanMemory(data)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error scanning: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Found %d potential secrets:\n\n", len(secrets))
+	fmt.Printf("Scanning: %s\n", filepath)
+	fmt.Printf("File size: %d bytes\n", len(data))
+	fmt.Printf("\nFound %d potential secrets:\n", len(secrets))
 
 	for i, secret := range secrets {
-		fmt.Printf("[%d] Type: %s\n", i+1, secret.Type)
-		fmt.Printf("    Value: %s\n", secret.Value)
-		fmt.Printf("    Confidence: %.0f%%\n\n", secret.Confidence*100)
+		fmt.Printf("\n[%d] Type: %s\n", i+1, secret.Type)
+		fmt.Printf("    Value: %s\n", truncate(secret.Value, 80))
+		fmt.Printf("    Confidence: %.0f%%\n", secret.Confidence*100)
+		if secret.Location != "" {
+			fmt.Printf("    Offset: %s\n", secret.Location)
+		}
+		if secret.Context != "" {
+			fmt.Printf("    Context: %s\n", truncate(secret.Context, 120))
+		}
+	}
+
+	if len(secrets) == 0 {
+		fmt.Println("\nNo secrets detected.")
 	}
 }
 
-func analyzeFile(filepath string) {
-	data, err := os.ReadFile(filepath)
+func runAnalyze(filepath string) {
+	data, err := forensics.ReadMemoryFile(filepath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Analyzing: %s\n", filepath)
-	fmt.Printf("File size: %d bytes\n\n", len(data))
-
 	dump := forensics.AnalyzeMemory(data)
 
-	fmt.Printf("Architecture: %s\n", dump.Architecture)
-	fmt.Printf("OS: %s\n", dump.OS)
-	fmt.Printf("Analysis Time: %s\n\n", dump.AnalysisTime)
+	fmt.Printf("Analyzing: %s\n", filepath)
+	fmt.Printf("File size: %d bytes\n", dump.DataSize)
+	fmt.Printf("Analysis time: %s\n", dump.Timestamp)
+	fmt.Println()
 
-	fmt.Printf("Secrets Found: %d\n", len(dump.Secrets))
+	fmt.Printf("Secrets found: %d\n", len(dump.Secrets))
 	if len(dump.Secrets) > 0 {
 		for _, secret := range dump.Secrets {
 			fmt.Printf("  - %s (confidence: %.0f%%)\n", secret.Type, secret.Confidence*100)
 		}
 	}
 
+	fmt.Println()
 	strings := forensics.ExtractStrings(data, 8)
-	fmt.Printf("Extracted Strings: %d\n", len(strings))
+	fmt.Printf("Extracted strings: %d\n", len(strings))
+	fmt.Printf("URLs detected: %d\n", dump.URLCount)
+	fmt.Printf("Emails detected: %d\n", dump.EmailCount)
+	fmt.Printf("IP addresses detected: %d\n", dump.IPCount)
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }

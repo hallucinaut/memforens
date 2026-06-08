@@ -1,46 +1,37 @@
-// Package forensics provides memory forensics functionality.
+// Package forensics provides memory forensics functionality for detecting
+// secrets, credentials, and artifacts in binary data.
 package forensics
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
+	"time"
 )
 
-// MemoryRegion represents a region of memory.
+const contextWindow = 50 // bytes of context to capture around matches
+
+// MemoryRegion represents a region of memory from /proc/self/maps format.
 type MemoryRegion struct {
-	StartAddr uint64
-	EndAddr   uint64
-	Size      uint64
+	StartAddr   uint64
+	EndAddr     uint64
+	Size        uint64
 	Permissions string
-	Mapping   string
+	Mapping     string
 }
 
-// MemoryDump represents a memory dump analysis result.
-type MemoryDump struct {
-	FilePath     string
-	Architecture string
-	OS           string
-	Regions      []MemoryRegion
-	Processes    []Process
-	Secrets      []Secret
-	NetworkConns []NetworkConnection
-	LoadedModules []Module
-	AnalysisTime  string
-}
-
-// Process represents a process found in memory.
+// Process represents a process entry from /proc/pid/stat format.
 type Process struct {
-	Name       string
-	PID        uint32
-	PPID       uint32
-	State      string
-	StartTime  string
+	Name        string
+	PID         uint32
+	PPID        uint32
+	State       string
+	StartTime   uint64
 	CommandLine string
-	EnvVars    []string
 }
 
-// Secret represents a potential secret found in memory.
+// Secret represents a detected secret with metadata.
 type Secret struct {
 	Type       string
 	Value      string
@@ -49,170 +40,193 @@ type Secret struct {
 	Confidence float64
 }
 
-// NetworkConnection represents a network connection.
+// NetworkConnection represents a network connection entry from /proc/net/tcp format.
 type NetworkConnection struct {
-	LocalAddr   string
-	RemoteAddr  string
-	State       string
-	PID         uint32
-	ProcessName string
-	Protocol    string
+	LocalAddr  string
+	RemoteAddr string
+	State      string
+	PID        uint32
+	Protocol   string
 }
 
-// Module represents a loaded module/library.
+// Module represents a loaded shared library.
 type Module struct {
-	Name    string
+	Name     string
 	BaseAddr uint64
-	Size    uint64
-	Path    string
+	Size     uint64
+	Path     string
 }
 
-// Scanner analyzes memory dumps for various artifacts.
-type Scanner struct {
-	knownSecrets []SecretPattern
-	knownPatterns []Pattern
+// PatternMatch represents a single match from pattern scanning.
+type PatternMatch struct {
+	Name  string
+	Value string
+	Pos   int
 }
 
-// SecretPattern defines a pattern for secret detection.
+// SecretPattern defines a regex pattern for secret detection.
 type SecretPattern struct {
-	Name      string
-	Pattern   *regexp.Regexp
+	Name       string
+	Pattern    *regexp.Regexp
 	Confidence float64
-	Example   string
 }
 
-// Pattern defines a generic pattern.
-type Pattern struct {
-	Name    string
+// GenericPattern defines a regex pattern for general artifact detection.
+type GenericPattern struct {
+	Name  string
 	Pattern *regexp.Regexp
 }
 
-// NewScanner creates a new memory scanner with known patterns.
+// Scanner analyzes binary data for secrets and artifacts.
+type Scanner struct {
+	secretPatterns    []SecretPattern
+	genericPatterns   []GenericPattern
+}
+
+// NewScanner creates a new Scanner pre-configured with known secret patterns.
 func NewScanner() *Scanner {
 	return &Scanner{
-		knownSecrets: []SecretPattern{
+		secretPatterns: []SecretPattern{
 			{
-				Name: "AWS Access Key",
-				Pattern: regexp.MustCompile(`(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}`),
+				Name:       "AWS Access Key",
+				Pattern:    regexp.MustCompile(`(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}`),
 				Confidence: 0.95,
-				Example:   "AKIAIOSFODNN7EXAMPLE",
 			},
 			{
-				Name: "AWS Secret Key",
-				Pattern: regexp.MustCompile(`(?i)aws[_-]?secret[_-]?access[_-]?key\s*[=:]\s*['"]?([A-Za-z0-9/+=]{40})['"]?`),
+				Name:       "AWS Secret Key",
+				Pattern:    regexp.MustCompile(`(?i)aws[_\-]?secret[_\-]?access[_\-]?key\s*[=:]\s*['"]?([A-Za-z0-9/+=]{40})['"]?`),
 				Confidence: 0.90,
-				Example:   "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 			},
 			{
-				Name: "GitHub Token",
-				Pattern: regexp.MustCompile(`(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36}`),
+				Name:       "GitHub Token",
+				Pattern:    regexp.MustCompile(`(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36}`),
 				Confidence: 0.95,
-				Example:   "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
 			},
 			{
-				Name: "Generic API Key",
-				Pattern: regexp.MustCompile(`(?i)(api[_-]?key|apikey|api_key)\s*[=:]\s*['"]?([A-Za-z0-9_\-]{20,})['"]?`),
+				Name:       "Generic API Key",
+				Pattern:    regexp.MustCompile(`(?i)(api[_\-]?key|apikey|api_key)\s*[=:]\s*['"]?([A-Za-z0-9_\-]{20,})['"]?`),
 				Confidence: 0.70,
-				Example:   "api_key=xxxxxxxxxxxxxxxxxxxx",
 			},
 			{
-				Name: "JWT Token",
-				Pattern: regexp.MustCompile(`eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*`),
+				Name:       "JWT Token",
+				Pattern:    regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`),
 				Confidence: 0.85,
-				Example:   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
 			},
 			{
-				Name: "Private Key",
-				Pattern: regexp.MustCompile(`-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----`),
-				Confidence: 1.0,
-				Example:   "-----BEGIN RSA PRIVATE KEY-----",
+				Name:       "Private Key",
+				Pattern:    regexp.MustCompile(`-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----`),
+				Confidence: 1.00,
 			},
 			{
-				Name: "Password in Memory",
-				Pattern: regexp.MustCompile(`(?i)(password|passwd|pwd|pass)\s*[=:]\s*['"]?([^\s'"']{4,})['"]?`),
+				Name:       "Password Assignment",
+				Pattern:    regexp.MustCompile(`(?i)(password|passwd|pwd|pass)\s*[=:]\s*['"]?([^\s'"&;]{4,})['"]?`),
 				Confidence: 0.60,
-				Example:   "password=secret123",
 			},
 		},
-		knownPatterns: []Pattern{
+		genericPatterns: []GenericPattern{
 			{
-				Name: "URL Pattern",
-				Pattern: regexp.MustCompile(`https?://[^\s"'<>]+`),
+				Name:      "URL",
+				Pattern:   regexp.MustCompile(`https?://[^\s"'<>]+`),
 			},
 			{
-				Name: "Email Pattern",
-				Pattern: regexp.MustCompile(`[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`),
+				Name:      "Email",
+				Pattern:   regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`),
 			},
 			{
-				Name: "IP Address",
-				Pattern: regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`),
+				Name:      "IPv4 Address",
+				Pattern:   regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`),
 			},
 		},
 	}
 }
 
-// ScanMemory scans memory data for secrets and artifacts.
+// ScanMemory scans binary data for secrets and returns deduplicated results.
 func (s *Scanner) ScanMemory(data []byte) ([]Secret, error) {
 	var secrets []Secret
-	foundSecrets := make(map[string]bool)
+	found := make(map[string]bool)
 
-	for _, pattern := range s.knownSecrets {
-		matches := pattern.Pattern.FindAllSubmatch(data, -1)
+	for _, p := range s.secretPatterns {
+		matches := p.Pattern.FindAllSubmatchIndex(data, -1)
+		if matches == nil {
+			continue
+		}
 		for _, match := range matches {
-			if len(match) > 0 {
-				secretValue := string(match[0])
-				key := fmt.Sprintf("%s:%s", pattern.Name, secretValue)
-				
-				if !foundSecrets[key] {
-					foundSecrets[key] = true
-					secrets = append(secrets, Secret{
-						Type:       pattern.Name,
-						Value:      secretValue,
-						Confidence: pattern.Confidence,
-					})
-				}
+			value := string(data[match[0]:match[1]])
+			key := p.Name + ":" + value
+			if found[key] {
+				continue
 			}
+			found[key] = true
+
+			context := extractContext(data, match[0], match[1])
+			location := byteOffsetToHex(match[0])
+
+			secrets = append(secrets, Secret{
+				Type:       p.Name,
+				Value:      value,
+				Location:   location,
+				Context:    context,
+				Confidence: p.Confidence,
+			})
 		}
 	}
 
 	return secrets, nil
 }
 
-// ScanForPatterns scans memory data for known patterns.
-func (s *Scanner) ScanForPatterns(data []byte) []string {
-	var matches []string
+// ScanForPatterns scans binary data for generic artifacts (URLs, emails, IPs).
+func (s *Scanner) ScanForPatterns(data []byte) []PatternMatch {
+	var matches []PatternMatch
 
-	for _, pattern := range s.knownPatterns {
-		matches = append(matches, pattern.Pattern.FindAllString(string(data), -1)...)
+	for _, p := range s.genericPatterns {
+		submatches := p.Pattern.FindAllSubmatchIndex(data, -1)
+		if submatches == nil {
+			continue
+		}
+		for _, m := range submatches {
+			matches = append(matches, PatternMatch{
+				Name:  p.Name,
+				Value: string(data[m[0]:m[1]]),
+				Pos:   m[0],
+			})
+		}
 	}
 
 	return matches
 }
 
-// ExtractStrings extracts printable strings from memory data.
+// ExtractStrings extracts printable ASCII strings of at least minLen length.
 func ExtractStrings(data []byte, minLen int) []string {
-	var strings []string
-	var current []byte
+	if minLen < 1 {
+		minLen = 4
+	}
+	var result []string
+	var current strings.Builder
 
 	for _, b := range data {
 		if b >= 0x20 && b <= 0x7e {
-			current = append(current, b)
+			current.WriteByte(b)
 		} else {
-			if len(current) >= minLen {
-				strings = append(strings, string(current))
+			if current.Len() >= minLen {
+				result = append(result, current.String())
 			}
-			current = nil
+			current.Reset()
 		}
 	}
 
-	if len(current) >= minLen {
-		strings = append(strings, string(current))
+	if current.Len() >= minLen {
+		result = append(result, current.String())
 	}
 
-	return strings
+	return result
 }
 
-// ParseMemoryRegions parses memory region information from proc/self/maps format.
+// ReadMemoryFile reads a file from disk and returns its contents.
+func ReadMemoryFile(filepath string) ([]byte, error) {
+	return os.ReadFile(filepath)
+}
+
+// ParseMemoryRegions parses /proc/self/maps format data into MemoryRegion structs.
 func ParseMemoryRegions(content string) []MemoryRegion {
 	var regions []MemoryRegion
 	lines := strings.Split(content, "\n")
@@ -228,54 +242,85 @@ func ParseMemoryRegions(content string) []MemoryRegion {
 			continue
 		}
 
-		// Parse address range
-		addrRange := strings.Split(parts[0], "-")
-		if len(addrRange) != 2 {
+		addrParts := strings.Split(parts[0], "-")
+		if len(addrParts) != 2 {
 			continue
 		}
 
-		startAddr, _ := parseHex(addrRange[0])
-		endAddr, _ := parseHex(addrRange[1])
+		startAddr, err := parseHex(addrParts[0])
+		if err != nil {
+			continue
+		}
+		endAddr, err := parseHex(addrParts[1])
+		if err != nil {
+			continue
+		}
 
-		region := MemoryRegion{
+		regions = append(regions, MemoryRegion{
 			StartAddr:   startAddr,
 			EndAddr:     endAddr,
 			Size:        endAddr - startAddr,
 			Permissions: parts[1],
 			Mapping:     parts[5],
-		}
-
-		regions = append(regions, region)
+		})
 	}
 
 	return regions
 }
 
-// ParseProcessInfo parses process information from proc format.
+// ParseProcessInfo parses /proc/pid/stat format data into Process structs.
 func ParseProcessInfo(content string) []Process {
 	var processes []Process
 	lines := strings.Split(content, "\n")
 
-	for i, line := range lines {
-		if i == 0 {
-			continue // Skip header
-		}
-		
-		parts := strings.Fields(line)
-		if len(parts) < 11 {
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
 
-		pid, _ := parseUint(parts[1])
-		ppid, _ := parseUint(parts[3])
-		startTime, _ := parseUint(parts[20])
+		// /proc/pid/stat format: pid (comm) state ppid ...
+		// comm is enclosed in parentheses and may contain spaces, so find the last ')'
+		closeParen := strings.LastIndex(line, ")")
+		if closeParen == -1 {
+			continue
+		}
+
+		beforeComm := line[:strings.Index(line, "(")]
+		afterComm := line[closeParen+2:] // skip ") "
+
+		parts := strings.Fields(beforeComm)
+		if len(parts) < 1 {
+			continue
+		}
+
+		pid, err := parseUint(parts[0])
+		if err != nil {
+			continue
+		}
+
+		ppidParts := strings.Fields(afterComm)
+		var ppid uint64
+		if len(ppidParts) >= 2 {
+			ppid, _ = parseUint(ppidParts[1])
+		}
+
+		state := ""
+		if len(ppidParts) > 0 {
+			state = ppidParts[0]
+		}
+
+		var startTime uint64
+		if len(ppidParts) >= 20 {
+			startTime, _ = parseUint(ppidParts[19])
+		}
 
 		process := Process{
-			Name:    parts[0],
-			PID:     uint32(pid),
-			PPID:    uint32(ppid),
-			State:   parts[2],
-			StartTime: fmt.Sprintf("%d", startTime),
+			Name:      line[strings.Index(line, "(")+1 : closeParen],
+			PID:       uint32(pid),
+			PPID:      uint32(ppid),
+			State:     state,
+			StartTime: startTime,
 		}
 
 		processes = append(processes, process)
@@ -284,121 +329,105 @@ func ParseProcessInfo(content string) []Process {
 	return processes
 }
 
-// parseHex parses a hex string to uint64.
+// byteOffsetToHex converts a byte offset to a hex string.
+func byteOffsetToHex(offset int) string {
+	return "0x" + fmt.Sprintf("%08x", offset)
+}
+
+// extractContext returns the surrounding bytes around a match range as a string.
+func extractContext(data []byte, start, end int) string {
+	ctxStart := 0
+	if start > contextWindow {
+		ctxStart = start - contextWindow
+	}
+	ctxEnd := len(data)
+	if end+contextWindow < ctxEnd {
+		ctxEnd = end + contextWindow
+	}
+
+	return string(data[ctxStart:ctxEnd])
+}
+
+// parseHex converts a hex string to uint64.
 func parseHex(s string) (uint64, error) {
 	var result uint64
-	fmt.Sscanf(s, "%x", &result)
+	n, err := fmt.Sscanf(s, "%x", &result)
+	if err != nil || n == 0 {
+		return 0, fmt.Errorf("invalid hex value: %s", s)
+	}
 	return result, nil
 }
 
-// parseUint parses a string to uint.
+// parseUint converts a decimal string to uint64.
 func parseUint(s string) (uint64, error) {
 	var result uint64
-	fmt.Sscanf(s, "%d", &result)
+	n, err := fmt.Sscanf(s, "%d", &result)
+	if err != nil || n == 0 {
+		return 0, fmt.Errorf("invalid integer value: %s", s)
+	}
 	return result, nil
 }
 
-// ReadMemoryFile reads memory dump file content.
-func ReadMemoryFile(filepath string) ([]byte, error) {
-	// This is a placeholder - in production would read actual memory dump
-	return []byte{}, fmt.Errorf("memory reading not implemented in demo")
-}
-
-// ScanFile scans a file for secrets and artifacts.
-func (s *Scanner) ScanFile(filepath string) (*MemoryDump, error) {
-	data, err := ReadMemoryFile(filepath)
-	if err != nil {
-		return nil, err
-	}
-
-	dump := &MemoryDump{
-		FilePath:     filepath,
-		Architecture: "x86_64",
-		OS:           "Linux",
-		AnalysisTime: "2024-02-25T00:00:00Z",
-	}
-
-	// Extract strings
-	extractedStrings := ExtractStrings(data, 8)
-	dump.NetworkConns = make([]NetworkConnection, 0)
-	dump.Secrets = make([]Secret, 0)
-
-	// Scan for secrets
-	secrets, err := s.ScanMemory(data)
-	if err != nil {
-		return nil, err
-	}
-	dump.Secrets = secrets
-
-	// Find URLs and IPs
-	patternMatches := s.ScanForPatterns(data)
-	for _, match := range patternMatches {
-		if strings.HasPrefix(match, "http") {
-			// Would add to network connections
-		}
-	}
-	_ = extractedStrings
-
-	return dump, nil
-}
-
-// GetSecrets returns all detected secrets with confidence filtering.
-func (s *Scanner) GetSecrets(secrets []Secret, minConfidence float64) []Secret {
+// FilterSecretsByConfidence returns secrets with confidence >= minConfidence.
+func FilterSecretsByConfidence(secrets []Secret, minConfidence float64) []Secret {
 	var filtered []Secret
-	for _, secret := range secrets {
-		if secret.Confidence >= minConfidence {
-			filtered = append(filtered, secret)
+	for _, s := range secrets {
+		if s.Confidence >= minConfidence {
+			filtered = append(filtered, s)
 		}
 	}
 	return filtered
 }
 
-// GetSecretsByType returns secrets filtered by type.
-func (s *Scanner) GetSecretsByType(secrets []Secret, secretType string) []Secret {
+// FilterSecretsByType returns secrets matching the given type.
+func FilterSecretsByType(secrets []Secret, secretType string) []Secret {
 	var filtered []Secret
-	for _, secret := range secrets {
-		if secret.Type == secretType {
-			filtered = append(filtered, secret)
+	for _, s := range secrets {
+		if s.Type == secretType {
+			filtered = append(filtered, s)
 		}
 	}
 	return filtered
 }
 
-// ExportSecrets exports secrets to YAML format.
-func ExportSecrets(secrets []Secret) (string, error) {
-	// Simplified export
-	var sb strings.Builder
-	for _, secret := range secrets {
-		sb.WriteString(fmt.Sprintf("- type: %s\n", secret.Type))
-		sb.WriteString(fmt.Sprintf("  value: %s\n", secret.Value))
-		sb.WriteString(fmt.Sprintf("  confidence: %.2f\n", secret.Confidence))
-		sb.WriteString("\n")
-	}
-	return sb.String(), nil
-}
-
-// AnalyzeMemory analyzes memory dump and returns comprehensive report.
+// AnalyzeMemory performs a full analysis of binary data and returns a report.
 func AnalyzeMemory(data []byte) *MemoryDump {
 	scanner := NewScanner()
 
-	dump := &MemoryDump{
-		Architecture: "x86_64",
-		OS:           "Linux",
-		AnalysisTime: "2024-02-25T00:00:00Z",
+	secrets, _ := scanner.ScanMemory(data)
+	patternMatches := scanner.ScanForPatterns(data)
+
+	// Count pattern match types
+	urlCount := 0
+	emailCount := 0
+	ipCount := 0
+	for _, m := range patternMatches {
+		switch m.Name {
+		case "URL":
+			urlCount++
+		case "Email":
+			emailCount++
+		case "IPv4 Address":
+			ipCount++
+		}
 	}
 
-	// Extract strings
-	_ = ExtractStrings(data, 4)
-	dump.NetworkConns = make([]NetworkConnection, 0)
-	dump.Secrets = make([]Secret, 0)
+	return &MemoryDump{
+		DataSize:    len(data),
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Secrets:     secrets,
+		URLCount:    urlCount,
+		EmailCount:  emailCount,
+		IPCount:     ipCount,
+	}
+}
 
-	// Scan for secrets
-	secrets, _ := scanner.ScanMemory(data)
-	dump.Secrets = secrets
-
-	// Count findings
-	dump.Processes = make([]Process, 0)
-	dump.LoadedModules = make([]Module, 0)
-
-	return dump
+// MemoryDump holds the results of a memory analysis.
+type MemoryDump struct {
+	DataSize   int
+	Timestamp  string
+	Secrets    []Secret
+	URLCount   int
+	EmailCount int
+	IPCount    int
 }
